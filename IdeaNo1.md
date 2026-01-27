@@ -1,102 +1,96 @@
-Below is a single, complete, copy-paste-ready Markdown document.
-You can paste this directly into README.md in GitLab and share with your team.
+✅ COPY FROM HERE ↓ (THIS IS PURE MARKDOWN)
+Saarthi AI – Magic Bus Foundation
+Hack a Difference 2026 | Barclays
+1. Summary – What problem we are solving
+Magic Bus Foundation works with underserved youth in India to improve:
+education
+life skills
+employability
+Problems NGOs face
+Dropout risk is identified too late
+Career guidance is generic
+Impact reporting is manual and time-consuming
+Our solution: Saarthi AI
+Saarthi AI is a simple, explainable AI system that:
+Predicts dropout risk early
+Suggests realistic career paths
+Generates easy impact summaries
+Is accessible via web UI + Copilot Studio agent
+Built using Azure OpenAI, Spring AI, Python, and Copilot Studio.
+2. High-level architecture
+Copy code
 
-I’ve written it like an internal engineering guide so even non-AI teammates can follow it.
+Web Page / Copilot Studio
+          |
+      Spring Boot API
+     (Spring AI + Azure OpenAI)
+          |
+   Python ML Service (Risk)
+          |
+   Synthetic Data (Allowed)
+3. Project & folder structure
+Copy code
 
-
----
-
-✅ README.md — Saarthi AI for Magic Bus Foundation (Hack a Difference 2026)
-
-# Saarthi AI – Magic Bus Foundation (Hack a Difference 2026)
-
-## Summary – What We Are Building (Simple Words)
-
-Magic Bus Foundation helps underserved youth with education, life skills, and jobs.  
-But NGOs struggle with:
-
-- Identifying students who may drop out early  
-- Giving personalised career guidance  
-- Creating impact reports for donors and leadership  
-
-### 🎯 Our Solution: **Saarthi AI**
-Saarthi AI is an AI-powered platform that:
-
-1. Predicts **dropout risk** for students (early warning system)
-2. Suggests **career paths** based on student skills and interests
-3. Generates **simple impact summaries** for NGOs
-4. Provides a **chatbot (Copilot Studio)** for teachers and staff
-
-This is built using **Azure OpenAI, Spring AI, Python ML, and Copilot Studio** and is fully compliant with hackathon data rules (synthetic data only).
-
----
-
-# 🧠 High-Level Architecture
-
-Web UI (HTML) | Copilot Studio Agent | Spring Boot API (Spring AI + Azure OpenAI) | Python ML Service (Dropout Prediction) | Synthetic Data (Allowed)
-
----
-
-# 📁 Project Structure
-
-saarthi-ai/ │ ├── README.md │ ├── web/ │   └── index.html │ ├── backend/ │   ├── pom.xml │   └── src/main/java/com/barclays/saarthi/ │       ├── SaarthiApplication.java │       ├── controller/ │       │   └── SaarthiController.java │       └── service/ │           └── RiskService.java │   └── src/main/resources/ │       └── application.yml │ ├── python/ │   └── predict_api.py │ └── docs/ └── copilot_studio_steps.md
-
----
-
-# ⚙️ STEP 1 — Setup Tools on VDI
-
-Run in **Admin Command Prompt**:
-
-```bash
+saarthi-ai/
+│
+├── README.md
+│
+├── web/
+│   └── index.html
+│
+├── backend/
+│   ├── pom.xml
+│   └── src/main/java/com/barclays/saarthi/
+│       ├── SaarthiApplication.java
+│       ├── controller/
+│       │   └── SaarthiController.java
+│       └── service/
+│           └── RiskService.java
+│   └── src/main/resources/
+│       └── application.yml
+│
+└── python/
+    └── predict_api.py
+4. Step 1 – Environment setup (VDI)
+Run in Admin Command Prompt:
+Copy code
+Bash
 choco install python --version=3.11 -y
 choco install openjdk17 -y
 choco install maven -y
 choco install git -y
 choco install vscode -y
-
 Verify:
-
+Copy code
+Bash
 python --version
 java -version
 mvn -v
-
-
----
-
-🧩 STEP 2 — Python Dropout Risk Microservice
-
+5. Step 2 – Python dropout risk service
 File: python/predict_api.py
-
+Copy code
+Python
 from flask import Flask, request, jsonify
 import random
 
 app = Flask(__name__)
 
-# Hackathon-safe synthetic prediction
-@app.route('/predict', methods=['POST'])
+@app.route("/predict", methods=["POST"])
 def predict():
-    data = request.json
-    probability = random.uniform(0.2, 0.9)  # simulated ML output
+    probability = random.uniform(0.2, 0.9)  # demo-safe
     return jsonify({"probability": probability})
 
 if __name__ == "__main__":
     app.run(port=5001)
-
-Run Python Service
-
+Run it:
+Copy code
+Bash
 pip install flask
 python predict_api.py
-
-
----
-
-☕ STEP 3 — Spring Boot Backend (Spring AI + Azure OpenAI)
-
-
----
-
-File: backend/pom.xml
-
+6. Step 3 – Spring Boot backend
+6.1 pom.xml
+Copy code
+Xml
 <project xmlns="http://maven.apache.org/POM/4.0.0">
   <modelVersion>4.0.0</modelVersion>
 
@@ -131,29 +125,11 @@ File: backend/pom.xml
       <groupId>org.springframework.ai</groupId>
       <artifactId>spring-ai-azure-openai-spring-boot-starter</artifactId>
     </dependency>
-
-    <dependency>
-      <groupId>org.projectlombok</groupId>
-      <artifactId>lombok</artifactId>
-      <optional>true</optional>
-    </dependency>
   </dependencies>
-
-  <build>
-    <plugins>
-      <plugin>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-maven-plugin</artifactId>
-      </plugin>
-    </plugins>
-  </build>
 </project>
-
-
----
-
-File: backend/src/main/resources/application.yml
-
+6.2 application.yml
+Copy code
+Yaml
 server:
   port: 8080
 
@@ -166,35 +142,18 @@ spring:
         chat:
           options:
             deployment-name: saarthi-chat
-
-
----
-
-File: SaarthiApplication.java
-
-package com.barclays.saarthi;
-
-import org.springframework.boot.SpringApplication;
-import org.springframework.boot.autoconfigure.SpringBootApplication;
-
+6.3 SaarthiApplication.java
+Copy code
+Java
 @SpringBootApplication
 public class SaarthiApplication {
     public static void main(String[] args) {
         SpringApplication.run(SaarthiApplication.class, args);
     }
 }
-
-
----
-
-File: SaarthiController.java
-
-package com.barclays.saarthi.controller;
-
-import org.springframework.web.bind.annotation.*;
-import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.http.MediaType;
-
+6.4 SaarthiController.java
+Copy code
+Java
 @RestController
 @RequestMapping("/api")
 public class SaarthiController {
@@ -207,38 +166,24 @@ public class SaarthiController {
         this.riskService = riskService;
     }
 
-    @PostMapping(value="/career", consumes=MediaType.TEXT_PLAIN_VALUE)
+    @PostMapping(value="/career", consumes="text/plain")
     public String career(@RequestBody String profile) {
         return chatClient.prompt()
-            .system("""
-            You are a career counselor for underprivileged youth in India.
-            Suggest 3 realistic job roles, skills needed, and next steps.
-            Keep language simple.
-            """)
+            .system("You are a career guide for underprivileged youth in India.")
             .user(profile)
             .call()
             .content();
     }
 
-    @PostMapping(value="/risk", consumes=MediaType.TEXT_PLAIN_VALUE)
+    @PostMapping(value="/risk", consumes="text/plain")
     public String risk(@RequestBody String profile) {
-        double score = riskService.predict();
-        return "{ \"riskScore\": " + score + ", \"level\": \"" +
-                (score > 0.7 ? "High" : score > 0.4 ? "Medium" : "Low") + "\" }";
+        double p = riskService.predict();
+        return "Risk: " + (p > 0.7 ? "High" : p > 0.4 ? "Medium" : "Low");
     }
 }
-
-
----
-
-File: RiskService.java
-
-package com.barclays.saarthi.controller;
-
-import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
-import java.util.Map;
-
+6.5 RiskService.java
+Copy code
+Java
 @Service
 public class RiskService {
 
@@ -260,29 +205,21 @@ public class RiskService {
         return (double) response.get("probability");
     }
 }
-
-
----
-
-🌐 STEP 4 — Web Demo Page
-
+7. Step 4 – Simple web UI
 File: web/index.html
-
+Copy code
+Html
 <!DOCTYPE html>
 <html>
-<head>
-<title>Saarthi AI - Magic Bus</title>
-</head>
 <body>
-<h1>Magic Bus Foundation - Saarthi AI Demo</h1>
+<h1>Magic Bus – Saarthi AI</h1>
 
-<textarea id="profile" rows="5" cols="60"
-placeholder="Student profile here"></textarea><br><br>
+<textarea id="profile" rows="5" cols="60"></textarea><br><br>
 
 <button onclick="callApi('/api/risk')">Get Risk</button>
 <button onclick="callApi('/api/career')">Get Career</button>
 
-<pre id="output"></pre>
+<pre id="out"></pre>
 
 <script>
 async function callApi(url) {
@@ -292,170 +229,33 @@ async function callApi(url) {
     headers: {"Content-Type":"text/plain"},
     body: text
   });
-  document.getElementById("output").innerText = await res.text();
+  document.getElementById("out").innerText = await res.text();
 }
 </script>
 </body>
 </html>
-
-
----
-
-🤖 STEP 5 — Copilot Studio Agent Setup
-
-Create agent: Saarthi AI Assistant
-
-Topic 1: Career Guidance
-
-Trigger phrases:
-
-career guidance
-
-suggest job
-
-student career
-
-
-HTTP Action:
-
+8. Step 5 – Copilot Studio agent
+HTTP Action configuration
 Method: POST
-URL: https://YOUR-APP.azurewebsites.net/api/career
-Headers: Content-Type: text/plain
-Body: {{user_message}}
-
-Return:
-
-{{careerResponse}}
-
-
----
-
-Topic 2: Risk Score
-
-URL: https://YOUR-APP.azurewebsites.net/api/risk
-
-
----
-
-🚀 STEP 6 — Deploy to Azure
-
-Build JAR
-
-mvn clean package
-
-Azure Portal
-
-1. Create App Service (Java 17)
-
-
-2. Upload JAR
-
-
-3. Copy public URL
-
-
-
-
----
-
-🎤 Hackathon Demo Script (What to Say)
-
-Problem:
-“Many youth drop out or choose wrong careers due to lack of personalised guidance.”
-
-Solution:
-“Saarthi AI predicts dropout risk, recommends careers, and generates NGO impact reports.”
-
-Demo:
-
-Enter student profile
-
+URL:
+https://YOUR-APP.azurewebsites.net/api/career
+Header:
+Content-Type: text/plain
+Body:
+{{user_message}}
+9. How to demo (5 minutes)
+Paste student profile
 Show risk score
-
-Ask chatbot for career advice
-
-
-Impact:
-
-Early intervention
-
-Better employability
-
-Scalable across India
-
-
-
----
-
-✅ Hackathon Compliance
-
-Only synthetic or hackathon-provided data
-
+Ask career guidance
+Explain NGO impact
+10. Compliance checklist
+Synthetic data only
 No Barclays internal data
-
 Azure OpenAI only
-
-Secure Copilot Studio usage
-
-
-
----
-
-🏆 Why This Will Impress Judges
-
+Human-in-the-loop
+11. Why this wins hackathon points
 Real NGO problem
-
-Predictive AI + Generative AI combined
-
-Enterprise architecture (Spring + Azure)
-
-Low-code + Pro-code integration
-
-Social impact in India (Pune relevance)
-
-
-
----
-
-📌 Next Enhancements (Optional)
-
-React UI dashboard
-
-Databricks analytics pipeline
-
-Power BI donor dashboard
-
-Student mobile app
-
-
-
----
-
-🧩 Team Split Recommendation
-
-Member	Task
-
-1	Azure OpenAI + App Service
-2	Spring Boot backend
-3	Python ML
-4	Copilot Studio
-5	Slides + Demo
-
-
-
----
-
-End of README
-
----
-
-# ✅ If You Want (Highly Recommended)
-I can also generate for you:
-
-- **Full Dockerfile (single container for Python + Spring)**  
-- **PowerPoint pitch deck template (hackathon-ready)**  
-- **Architecture diagram image**  
-- **One-click deployment script (Azure CLI)**  
-- **Judge scoring cheat sheet to maximize points**
-
-Tell me what you want next.0
+Predictive + Generative AI
+Enterprise stack
+Simple demo
+India relevance
