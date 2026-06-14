@@ -1,0 +1,534 @@
+h1. BAMOE 8.0 to 9.4 Migration - Scheduler Component Analysis
+
+h2. 1. Overview
+
+This document covers the technical analysis and migration approach for the Scheduler component as part of the BAMOE 8.0 to 9.4 migration of the *status-mgmt-api* Spring Boot application.
+
+The scheduler component is responsible for triggering robotic queue processing at configured times. It allows operations teams to view, reschedule, and cancel queue schedules via the Home Screen UI.
+
+----
+
+h2. 2. Old Architecture (BAMOE 8.x)
+
+h3. 2.1 Component Stack
+
+|| Component || Class/Interface || Role ||
+| UI Screen | HomeScreenController | Exposes schedule/cancel endpoints |
+| Service Layer | SchedulerInfoServiceImpl | Orchestrates schedule/cancel/list logic |
+| Execution Bridge | OlaResponseQServiceImpl (x14) | Command + Reoccurring implementations |
+| Scheduler Engine | org.kie.api.executor.ExecutorService | jBPM built-in async executor |
+| Persistence | REQUESTINFO table | Stored all scheduled job state in Oracle |
+| Queue Execution | QSchedulerServiceImpl | Did actual task processing via jBPM APIs |
+
+h3. 2.2 Old Flow
+
+{code:title=Old Scheduler Flow}
+Application Startup
+  → Each *ServiceImpl.getScheduleTime() [Reoccurring]
+  → ExecutorService.scheduleRequest(commandName, date, CommandContext)
+  → Persisted to REQUESTINFO table in Oracle
+
+UI: getRoboticQList()
+  → ExecutorService.getQueuedRequests()
+  → Reads REQUESTINFO table → returns {queueName: nextFireTime}
+
+UI: updateRoboticQTimer(ON, queueName, newDateTime)
+  → ExecutorService.cancelRequest(existingId)
+  → ExecutorService.scheduleRequest(commandName, newDate, ctx)
+
+UI: updateRoboticQTimer(OFF, queueName)
+  → ExecutorService.cancelRequest(requestId)
+
+At Scheduled Time:
+  → ExecutorService fires Command
+  → OlaResponseQServiceImpl.execute(CommandContext)
+  → QSchedulerService.trigger(queueName)
+  → Processes user tasks via jBPM RuntimeDataService/UserTaskService
+{code}
+
+h3. 2.3 Old Properties Configuration
+
+{code:title=Old application.properties - Scheduler Runtimes}
+roboticqueue.olaresponseq.runtime=0 0 * * * ?
+roboticqueue.nointerfaceq.runtime=0 10 * * * ?
+roboticqueue.ntcholdq.runtime=0 0 0/4 * * ?
+roboticqueue.ngcback.runtime=0 0 0/2 * * ?
+roboticqueue.logCleanup.runtime=0 0 23 * * ?
+roboticqueue.caslssq.runtime=0 30 0/4 * * ?
+roboticqueue.nodeq.runtime=0 30 0/2 * * ?
+roboticqueue.nouploadq.runtime=0 30 0/4 * * ?
+roboticqueue.batchResubmitq.runtime=0 40 0/4 * * ?
+roboticqueue.lapsedProcess.runtime=0 0 8 * * ?
+retriggerOnlineapp.runtime=#{300 * 1000}
+{code}
+
+h3. 2.4 Old APIs Used (All Removed in BAMOE 9.x)
+
+|| Old Class/Interface || Package || Purpose ||
+| ExecutorService | org.kie.api.executor | Schedule/cancel/query jobs |
+| ExecutionResults | org.kie.api.executor | Return type from Command.execute() |
+| CommandContext | org.kie.api.executor | Input context to Command |
+| Command | org.kie.api.executor | Interface for executable jobs |
+| Reoccurring | org.kie.api.executor | Interface for recurring job schedule time |
+| RequestInfo | org.kie.api.executor | Represents a scheduled job record |
+| STATUS | org.kie.api.executor | QUEUED / RUNNING / CANCELLED enum |
+| RuntimeDataService | org.jbpm.services.api | Query user tasks |
+| AdvanceRuntimeDataService | org.jbpm.services.api | Advanced task query with variables |
+| UserTaskService | org.jbpm.services.api | Claim/start/complete tasks |
+| UserTaskInstanceWithPotOwnerDesc | org.jbpm.services.api.model | Task data object |
+| QueryParam / QueryContext | org.kie.internal.query | Query filters and pagination |
+
+*All of the above packages are completely removed in BAMOE 9.x / Kogito.*
+
+----
+
+h2. 3. Migration Options Considered
+
+h3. 3.1 Option A - Kogito Jobs Service (REJECTED)
+
+h4. What It Is
+
+The Kogito Jobs Service is a built-in scheduling component available in BAMOE 9.x via the following dependencies:
+
+{code:lang=groovy|title=Jobs Service Dependencies}
+implementation 'org.kie:kogito-addons-springboot-embedded-jobs'
+implementation 'org.kie:kogito-addons-springboot-embedded-jobs-jpa'
+implementation 'org.kie.kogito:kogito-addons-springboot-jobs-management'
+{code}
+
+It is already present in the migrated project's build.gradle and application.properties.
+
+h4. POC Findings
+
+A proof of concept was conducted to determine whether Jobs Service could replace the old ExecutorService for scheduler queue management.
+
+{code:lang=java|title=Jobs Service POC Attempt}
+// Attempted: Schedule a non-BPMN job via Jobs Service
+ProcessJobDescription job = ProcessJobDescription.of(
+    ExactExpirationTime.of(ZonedDateTime.now().plusMinutes(2)),
+    "TEST_PROCESS"
+);
+String jobId = jobsService.scheduleJob(job);
+{code}
+
+*POC Result:* The Jobs Service requires a valid BPMN process definition to exist for the scheduled callback. It fires an HTTP callback to a BPMN process endpoint. It cannot instantiate an arbitrary Java class by name and call an execute() method.
+
+h4. Why Jobs Service Was Rejected
+
+|| Reason || Detail ||
+| BPMN-only design | Jobs Service is designed exclusively to advance BPMN process instance timers. It fires HTTP callbacks to BPMN runtime endpoints only. |
+| No Command pattern support | The old system used Command interface implementations (OlaResponseQServiceImpl etc.) identified by class name. Jobs Service has no equivalent concept. |
+| No arbitrary Java execution | Jobs Service cannot call QSchedulerService.trigger(queueName) directly. It can only POST to a BPMN process endpoint. |
+| No schedule/cancel/list API equivalent | Jobs Service has no equivalent to ExecutorService.getQueuedRequests(), getRequestsByCommand(), or cancelRequest() that works outside BPMN context. |
+| IBM documentation confirms gap | IBM BAMOE 9.4 migration tutorials (13 tutorials) contain no migration path for ExecutorService used outside BPMN process context. Tutorial 12 (Database Integration and Async Processing) covers Jobs Service only for BPMN timer callbacks. |
+| No UI state mapping | Jobs Service has no concept of QUEUED/RUNNING/CANCELLED states equivalent to the old RequestInfo.getStatus() used to populate the UI scheduler table. |
+
+h4. IBM Documentation Reference
+
+From the official BAMOE 9.4 migration tutorials page:
+[https://www.ibm.com/docs/en/ibamoe/9.4.x?topic=80x-using-bamoe-migration-tutorials]
+
+*Tutorial 12 - Database Integration and Async Processing* covers Jobs Service only for integrating BPMN process timer callbacks. No tutorial covers migration of ExecutorService used for non-BPMN arbitrary Java command execution.
+
+From the Apache KIE Kogito Jobs Service wiki:
+"The Jobs Service receives requests of job scheduling and it sends a request at the time specified on the job request... The REST endpoint that is provided with the add-on is responsible for receiving the callbacks from Job Service at exact time when the timer was scheduled and by that move *the process instance execution forward*."
+
+This confirms Jobs Service is BPMN process execution only.
+
+----
+
+h3. 3.2 Option B - Spring TaskScheduler / ScheduledFuture (REJECTED)
+
+h4. What It Is
+
+Spring Boot's built-in in-memory task scheduler using @Scheduled, TaskScheduler, and ScheduledFuture.
+
+h4. Why It Was Rejected
+
+|| Reason || Detail ||
+| Not multi-pod safe | ScheduledFuture objects are stored in JVM memory per pod. On pod restart all scheduled tasks are lost even though the DB record remains. |
+| OpenShift / APAAS risk | The application runs on OpenShift with multiple pods. An in-memory scheduler fires on every pod simultaneously causing duplicate queue processing. |
+| No persistence | No equivalent to REQUESTINFO table. Scheduled state is lost on restart. |
+| No cancel/reschedule equivalent | ScheduledFuture.cancel() only works within the same pod and same JVM lifetime. |
+| UI state mismatch | Cannot reproduce QUEUED/RUNNING/CANCELLED states for the scheduler UI table. |
+| Previous BPMN timer issue | The team already experienced the multi-pod timer duplication problem with BPMN timers. Spring in-memory scheduler has the same problem. |
+
+----
+
+h3. 3.3 Option C - Quartz Scheduler with JDBCJobStore (SELECTED)
+
+h4. What It Is
+
+Quartz is a Java job scheduling library that supports clustered, database-backed job scheduling. Spring Boot provides first-class integration via spring-boot-starter-quartz.
+
+h4. Why Quartz Was Selected
+
+|| Reason || Detail ||
+| DB-backed persistence | All job state stored in QRTZ_* Oracle tables. Survives pod restarts. Exact structural equivalent of old REQUESTINFO table. |
+| Multi-pod / cluster safe | JDBCJobStore with isClustered=true uses pessimistic DB locking. Only one pod fires a given job even across N pods. Solves the multi-pod problem completely. |
+| QRTZ_* tables already exist | All 11 Quartz tables (QRTZ_JOB_DETAILS, QRTZ_TRIGGERS, QRTZ_CRON_TRIGGERS etc.) are already present in the RPAM Oracle schema and are empty. No DDL required. |
+| Full cron support | Quartz CronTrigger directly replaces the old Reoccurring.getScheduleTime() cron expressions. Same cron format (Quartz cron). |
+| One-time override support | Quartz SimpleTrigger supports one-time fire at a specific date/time. Directly replaces ExecutorService.scheduleRequest(commandName, date, ctx). |
+| Cancel / pause support | Quartz Scheduler.unscheduleJob() and pauseTrigger() directly replace ExecutorService.cancelRequest(). |
+| List queued jobs | Quartz Scheduler.getJobKeys() + getTrigger() replace ExecutorService.getQueuedRequests(). |
+| No BPMN dependency | Quartz executes arbitrary Java logic via the Job interface. Directly supports calling QSchedulerService.trigger(queueName). |
+| DisallowConcurrentExecution | @DisallowConcurrentExecution annotation prevents duplicate execution of the same job across pods at the cluster level. |
+| Spring Boot auto-configuration | spring-boot-starter-quartz integrates with Spring context. @Autowired works inside Job classes via SpringBeanJobFactory. |
+| Minimal code change | Controller, QSchedulerService interface, QSchedulerServiceImpl business logic, and UI are all unchanged. |
+
+----
+
+h2. 4. Migration Mapping - Old vs New
+
+h3. 4.1 API Mapping
+
+|| Old (BAMOE 8.x) || New (BAMOE 9.x / Quartz) ||
+| org.kie.api.executor.ExecutorService | org.quartz.Scheduler (via ExecutorServiceAdapter) |
+| ExecutorService.scheduleRequest(name, date, ctx) | ExecutorServiceAdapter.scheduleRequest() → Quartz SimpleTrigger |
+| ExecutorService.cancelRequest(id) | ExecutorServiceAdapter.cancelRequest() → Scheduler.unscheduleJob() |
+| ExecutorService.getQueuedRequests(QueryContext) | ExecutorServiceAdapter.getQueuedRequests() → Scheduler.getJobKeys() |
+| ExecutorService.getRequestsByCommand(name, STATUS.QUEUED) | ExecutorServiceAdapter.isQueued(commandName) |
+| ExecutorService.getRequestsByCommand(name, STATUS.RUNNING) | ExecutorServiceAdapter.isRunning(commandName) |
+| Command.execute(CommandContext) | CommandExecutorJob.execute(JobExecutionContext) |
+| Reoccurring.getScheduleTime() | SchedulerStartupSeeder → seedCronJob() → Quartz CronTrigger |
+| RequestInfo.getTime() | Trigger.getNextFireTime() |
+| RequestInfo.getStatus() QUEUED | TriggerState.NORMAL / WAITING |
+| RequestInfo.getStatus() RUNNING | Scheduler.getCurrentlyExecutingJobs() |
+| RequestInfo.getStatus() CANCELLED | Trigger paused or absent |
+| REQUESTINFO Oracle table | QRTZ_JOB_DETAILS + QRTZ_TRIGGERS + QRTZ_CRON_TRIGGERS |
+| org.kie.api.executor.ExecutionResults | com.barclays.api.status.mgmt.schedular.model.ExecutionResults (custom) |
+
+h3. 4.2 Class Mapping
+
+|| Old Class || New Class || Change Type ||
+| OlaResponseQServiceImpl | CommandExecutorJob | Replaced (all 14 Command impls → single Job class) |
+| NoInterfaceQServiceImpl | CommandExecutorJob | Deleted |
+| NTCHoldQServiceImpl | CommandExecutorJob | Deleted |
+| NGCBckServiceImpl | CommandExecutorJob | Deleted |
+| LogCleanUpServiceImpl | CommandExecutorJob | Deleted |
+| CASLSSQServiceImpl | CommandExecutorJob | Deleted |
+| NODEQServiceImpl | CommandExecutorJob | Deleted |
+| NoUploadQServiceImpl | CommandExecutorJob | Deleted |
+| BatchResubmitQServiceImpl | CommandExecutorJob | Deleted |
+| LapsedProcessServiceImpl | CommandExecutorJob | Deleted |
+| FailedSoftToHardServiceImpl | CommandExecutorJob | Deleted |
+| ApplicationExpiryProcessServiceImpl | CommandExecutorJob | Deleted |
+| AdvancedLogCleanUpServiceImpl | CommandExecutorJob | Deleted |
+| SMSRetryServiceImpl | CommandExecutorJob | Deleted |
+| SchedulerInfoServiceImpl | SchedulerInfoServiceImpl | Modified (~5 call sites only) |
+| QSchedulerServiceImpl (jBPM APIs) | QSchedulerServiceImpl (GraphQL + REST) | Rewritten |
+| N/A | ExecutorServiceAdapter | New - adapter layer |
+| N/A | SchedulerStartupSeeder | New - replaces Reoccurring |
+| N/A | SchedulerUtils | New - holds cron properties |
+| N/A | QuartzConfig | New - datasource wiring |
+| N/A | ExecutionResults (custom) | New - replaces org.kie.api.executor.ExecutionResults |
+| HomeScreenController | HomeScreenController | Unchanged |
+| SchedulerConstants | SchedulerConstants | Minor additions only |
+
+h3. 4.3 QSchedulerServiceImpl Internal API Mapping
+
+|| Old jBPM 8 API || New BAMOE 9.x API ||
+| RuntimeDataService.getTasksAssignedAsPotentialOwnerByStatus() | GraphQL UserTaskInstances query via graphQlRestClient |
+| AdvanceRuntimeDataService.queryUserTasksByVariables() | GraphQL UserTaskInstances with name + state filter |
+| UserTaskInstanceWithPotOwnerDesc | UserTaskInstance (com.barclays.api.status.mgmt.model.graphql) |
+| UserTaskService.claim(taskId, userId) | REST POST /usertasks/instance/{id}/transition {transitionId: claim} |
+| UserTaskService.start(taskId, userId) | REST POST /usertasks/instance/{id}/transition {transitionId: start} |
+| UserTaskService.complete(taskId, userId, vars) | REST POST /usertasks/instance/{id}/transition {transitionId: complete} |
+| ProcessService.setProcessVariable() | ProcessUtilService.setProcessVariable() (already migrated) |
+| task.getCorrelationKey() → caseId | processInstance.businessKey via nested GraphQL query |
+| task.getCreatedOn() | UserTaskInstance.started (Instant) |
+| task.getActualOwner() | UserTaskInstance.actualOwner |
+| PeopleAssignments.getPotentialOwners() | UserTaskInstance.potentialUsers (List<String>) |
+| kjars.getMainContainer() filter | Removed - no KJar/deployment concept in BAMOE 9.x |
+
+----
+
+h2. 5. New Architecture (BAMOE 9.x)
+
+h3. 5.1 Component Stack
+
+|| Component || Class || Role ||
+| UI Screen | HomeScreenController | Unchanged |
+| Service Layer | SchedulerInfoServiceImpl | Modified - uses ExecutorServiceAdapter |
+| Adapter Layer | ExecutorServiceAdapter | New - wraps Quartz, mimics old ExecutorService API |
+| Startup Seeding | SchedulerStartupSeeder | New - seeds cron jobs on startup |
+| Job Execution | CommandExecutorJob | New - Quartz Job, calls QSchedulerService.trigger() |
+| Queue Execution | QSchedulerServiceImpl | Rewritten - uses GraphQL + REST |
+| Scheduler Engine | org.quartz.Scheduler | Quartz JDBCJobStore |
+| Persistence | QRTZ_* Oracle tables (11 tables) | Already present in RPAM schema |
+| Task Query | GraphQL via graphQlRestClient | Queries RPAM.TASKS (Data Index) |
+| Task Execution | REST via localRestClient | BAMOE 9.x user task transition API |
+
+h3. 5.2 New Flow
+
+{code:title=New Scheduler Flow}
+Application Startup
+  → SchedulerStartupSeeder.onApplicationEvent()
+  → ExecutorServiceAdapter.seedCronJob(commandName, cronExpression)
+  → Quartz CronTrigger persisted to QRTZ_CRON_TRIGGERS + QRTZ_JOB_DETAILS
+  → (safe to call repeatedly - skips if job already exists)
+
+UI: getRoboticQList()
+  → SchedulerInfoServiceImpl.getRoboticQList()
+  → ExecutorServiceAdapter.getQueuedRequests()
+  → Quartz Scheduler.getJobKeys() + getTrigger()
+  → Returns {queueDisplayName: nextFireTime} - same format as old UI
+
+UI: updateRoboticQTimer(ON, queueName, newDateTime)
+  → SchedulerInfoServiceImpl.updateDate()
+  → ExecutorServiceAdapter.cancelRequest() [removes existing one-time trigger]
+  → ExecutorServiceAdapter.scheduleRequest(commandName, newDate, ctx)
+  → Quartz SimpleTrigger persisted to QRTZ_SIMPLE_TRIGGERS
+
+UI: updateRoboticQTimer(OFF, queueName)
+  → SchedulerInfoServiceImpl.updateDate()
+  → ExecutorServiceAdapter.cancelRequest()
+  → Quartz trigger unscheduled / paused
+
+At Scheduled Time (Quartz fires - one pod only due to cluster locking):
+  → CommandExecutorJob.execute(JobExecutionContext)
+  → toQueueName(commandName) [maps class name to queue name constant]
+  → QSchedulerService.trigger(queueName)
+  → fetchTasksByName() via GraphQL → RPAM.TASKS
+  → For each task: executeTask()
+    → REST claim/start → localRestClient
+    → ProcessUtilService.setProcessVariable()
+    → updateUserInCaseLockTable() → VECTUSCASE.VEC_CASELOCK
+    → REST complete → localRestClient
+{code}
+
+h3. 5.3 Database Tables Used
+
+|| Table || Schema || Purpose || Status ||
+| QRTZ_JOB_DETAILS | RPAM | Stores job definitions | Already exists, empty |
+| QRTZ_TRIGGERS | RPAM | Stores trigger state | Already exists, empty |
+| QRTZ_CRON_TRIGGERS | RPAM | Stores cron expressions | Already exists, empty |
+| QRTZ_SIMPLE_TRIGGERS | RPAM | Stores one-time overrides | Already exists, empty |
+| QRTZ_FIRED_TRIGGERS | RPAM | Tracks firing state for cluster | Already exists, empty |
+| QRTZ_LOCKS | RPAM | Cluster pessimistic locking | Already exists, empty |
+| QRTZ_SCHEDULER_STATE | RPAM | Pod heartbeat tracking | Already exists, empty |
+| RPAM.TASKS | RPAM | Data Index - user task query source | Active |
+| VECTUSCASE.VEC_CASELOCK | VECTUSCASE | Case lock update during task execution | Active |
+
+----
+
+h2. 6. New Files Created
+
+h3. 6.1 New Classes
+
+{code:title=New Class List}
+com.barclays.api.status.mgmt.schedular.model.ExecutionResults
+  → Replaces org.kie.api.executor.ExecutionResults
+  → Simple Map<String,Object> wrapper
+
+com.barclays.api.status.mgmt.schedular.adapter.ExecutorServiceAdapter
+  → Core adapter wrapping Quartz Scheduler
+  → Provides scheduleRequest(), cancelRequest(), getQueuedRequests(),
+    isQueued(), isRunning(), seedCronJob()
+
+com.barclays.api.status.mgmt.schedular.adapter.CommandExecutorJob
+  → Quartz Job implementation
+  → Annotated @DisallowConcurrentExecution for multi-pod safety
+  → Maps commandName → queueName → calls QSchedulerService.trigger()
+
+com.barclays.api.status.mgmt.schedular.adapter.SchedulerStartupSeeder
+  → ApplicationListener<ApplicationReadyEvent>
+  → Seeds all 10 cron jobs on startup
+  → Idempotent - safe on multi-pod startup
+
+com.barclays.api.status.mgmt.schedular.util.SchedulerUtils
+  → Holds @Value injected cron expressions from properties
+  → Replaces old SchedulerUtils.getOlaresponseqRuntime() etc.
+
+com.barclays.api.status.mgmt.config.QuartzConfig
+  → Wires Quartz to BAMOE Oracle datasource (RPAM schema)
+  → Provides SpringBeanJobFactory for @Autowired in Job classes
+{code}
+
+h3. 6.2 Modified Classes
+
+{code:title=Modified Class List}
+SchedulerInfoServiceImpl
+  → Removed: @Autowired ExecutorService kieExecutorService
+  → Added: @Autowired ExecutorServiceAdapter executorServiceAdapter
+  → Modified: getRoboticQList() - uses adapter.getQueuedRequests()
+  → Modified: updateDate() - uses adapter.scheduleRequest/cancelRequest
+  → Removed: getCommandContextObj(), updateRequestInfo(),
+             cancelRequestInfo(), getQList()
+
+QSchedulerService (interface)
+  → Import change only: org.kie.api.executor.ExecutionResults
+    → com.barclays.api.status.mgmt.schedular.model.ExecutionResults
+
+QSchedulerServiceImpl
+  → Complete rewrite of trigger() method
+  → Old jBPM APIs replaced with GraphQL + REST
+  → Other interface methods kept as stubs pending full migration
+
+SchedulerConstants
+  → Added 7 new queue name string constants
+  → All existing constants unchanged
+
+GraphQLQueryLoader
+  → Added: userTasksByName query registration
+
+UserTaskInstance model
+  → Added: externalReferenceId field
+  → Added: processInstance nested object (for businessKey)
+{code}
+
+h3. 6.3 Deleted Classes
+
+{code:title=Deleted Class List - 14 Command Implementations}
+OlaResponseQServiceImpl
+NoInterfaceQServiceImpl
+NTCHoldQServiceImpl
+NGCBckServiceImpl
+LogCleanUpServiceImpl
+CASLSSQServiceImpl
+NODEQServiceImpl
+NoUploadQServiceImpl
+BatchResubmitQServiceImpl
+LapsedProcessServiceImpl
+FailedSoftToHardServiceImpl
+ApplicationExpiryProcessServiceImpl
+AdvancedLogCleanUpServiceImpl
+SMSRetryServiceImpl
+{code}
+
+All 14 classes had identical structure:
+- Implemented Command + Reoccurring
+- execute() only called QSchedulerService.trigger(queueName)
+- getScheduleTime() only returned cron-based date
+- Both responsibilities replaced by CommandExecutorJob + SchedulerStartupSeeder
+
+----
+
+h2. 7. Multi-Pod Safety Analysis
+
+|| Concern || Old Solution || New Solution ||
+| Duplicate job execution across pods | jBPM ExecutorService pessimistic DB lock on REQUESTINFO | Quartz JDBCJobStore pessimistic DB lock on QRTZ_FIRED_TRIGGERS |
+| Job state loss on pod restart | REQUESTINFO persisted in Oracle | QRTZ_* tables persisted in Oracle |
+| Concurrent execution of same job | jBPM handled internally | @DisallowConcurrentExecution on CommandExecutorJob |
+| Pod identification | jBPM executor ID | Quartz instanceId=AUTO (unique per pod) |
+| Cluster heartbeat | jBPM internal | QRTZ_SCHEDULER_STATE table |
+| BPMN timer duplication | Was a known issue in BAMOE 8 | Not applicable - Quartz is external to BPMN runtime |
+
+----
+
+h2. 8. UI Behaviour - Unchanged
+
+The complete UI contract is preserved:
+
+|| UI Action || Old Behaviour || New Behaviour ||
+| Page load - scheduler table | getRoboticQList() returns [{queueName: time}] | Identical format returned |
+| Queue list dropdown | From robotic.queue.list property | Unchanged - same property |
+| Action ON + datetime + submit | Reschedules queue to new time | Same result via Quartz SimpleTrigger |
+| Action OFF + submit | Cancels scheduled run | Same result via Quartz unschedule/pause |
+| Success message | "OlaResponseQ Has Been Rescheduled At..." | Identical message |
+| Scheduler table refresh | Shows updated time | Shows updated Quartz next fire time |
+
+----
+
+h2. 9. Dependencies Added
+
+h3. build.gradle
+
+{code:lang=groovy|title=New Dependency}
+implementation 'org.springframework.boot:spring-boot-starter-quartz'
+{code}
+
+h3. application.properties additions
+
+{code:lang=properties|title=Quartz JDBCJobStore Configuration}
+spring.quartz.job-store-type=jdbc
+spring.quartz.jdbc.initialize-schema=never
+spring.quartz.auto-startup=true
+spring.quartz.properties.org.quartz.scheduler.instanceName=CASScheduler
+spring.quartz.properties.org.quartz.scheduler.instanceId=AUTO
+spring.quartz.properties.org.quartz.jobStore.class=org.quartz.impl.jdbcjobstore.JobStoreTX
+spring.quartz.properties.org.quartz.jobStore.driverDelegateClass=org.quartz.impl.jdbcjobstore.oracle.OracleDelegate
+spring.quartz.properties.org.quartz.jobStore.tablePrefix=QRTZ_
+spring.quartz.properties.org.quartz.jobStore.isClustered=true
+spring.quartz.properties.org.quartz.jobStore.clusterCheckinInterval=20000
+spring.quartz.properties.org.quartz.threadPool.threadCount=5
+{code}
+
+----
+
+h2. 10. Risks and Mitigations
+
+|| Risk || Severity || Mitigation ||
+| Quartz tables not present in environment | High | Verified - all 11 QRTZ_* tables present in RPAM schema, empty, ready to use |
+| getCaseId() incorrect before scheduler tasks in RPAM.TASKS | Medium | 3-level fallback implemented: processInstance.businessKey → externalReferenceId → PROCESS_INSTANCE_STATE_LOG.BUSINESS_KEY |
+| localRestClient base URL incorrect for task transitions | Medium | Verify kogito.service.url in properties matches application endpoint |
+| Quartz datasource conflict with BAMOE datasource | Low | QuartzConfig explicitly wires to bamoeDataSource via @QuartzDataSource |
+| Command class names in QRTZ_JOB_DETAILS reference deleted classes | Low | CommandExecutorJob uses commandName as data key only, classes not instantiated |
+| Scheduler not fired on first pod startup if tables empty | Low | SchedulerStartupSeeder runs on ApplicationReadyEvent and seeds all 10 queues |
+| RetriggerOnlineAppsSchedular affected | None | RetriggerOnlineAppsSchedular uses @Scheduled(fixedRateString) - completely separate, unchanged |
+
+----
+
+h2. 11. Verification Steps
+
+h3. After Deployment
+
+{code:lang=sql|title=Verify Quartz Jobs Seeded}
+-- Should return 10 rows after first startup
+SELECT JOB_NAME, JOB_GROUP, DESCRIPTION
+FROM RPAM.QRTZ_JOB_DETAILS
+WHERE SCHED_NAME = 'CASScheduler';
+
+-- Should return 10 cron triggers
+SELECT JOB_NAME, TRIGGER_NAME, CRON_EXPRESSION,
+       TO_CHAR(NEXT_FIRE_TIME/1000, '99999999999') AS NEXT_FIRE_EPOCH
+FROM RPAM.QRTZ_CRON_TRIGGERS
+WHERE SCHED_NAME = 'CASScheduler';
+{code}
+
+{code:lang=sql|title=Verify UI getRoboticQList Response}
+-- Call via browser or Postman:
+-- GET /retrieveAppDetails/queueList/getRoboticQList
+-- Expected: JSON array with 10 entries [{queueName: nextFireTime}]
+{code}
+
+{code:lang=sql|title=Verify Reschedule}
+-- After UI submit ON with new time, check:
+SELECT TRIGGER_NAME, NEXT_FIRE_TIME
+FROM RPAM.QRTZ_SIMPLE_TRIGGERS
+WHERE SCHED_NAME = 'CASScheduler';
+{code}
+
+{code:lang=sql|title=Verify Cancel}
+-- After UI submit OFF, trigger should be absent or paused:
+SELECT TRIGGER_NAME, TRIGGER_STATE
+FROM RPAM.QRTZ_TRIGGERS
+WHERE SCHED_NAME = 'CASScheduler';
+{code}
+
+----
+
+h2. 12. Decision Summary
+
+{panel:title=Final Decision: Quartz Scheduler with JDBCJobStore|borderStyle=solid|borderColor=#36B37E|titleBGColor=#36B37E|titleColor=#FFFFFF}
+*Approach:* Replace org.kie.api.executor.ExecutorService with Quartz Scheduler using JDBCJobStore backed by the existing RPAM Oracle schema QRTZ_* tables.
+
+*Reason Jobs Service rejected:* BPMN-process-only design. Cannot execute arbitrary Java Command classes. No equivalent to getQueuedRequests() / cancelRequest() outside BPMN context. Confirmed by IBM documentation and POC.
+
+*Reason Spring TaskScheduler rejected:* In-memory only. Not safe across multiple OpenShift pods. State lost on pod restart.
+
+*Why Quartz:* DB-backed, cluster-safe, full cron + one-time scheduling, cancel/pause support, arbitrary Java execution, Spring Boot native integration, QRTZ tables already present in RPAM schema.
+
+*UI impact:* Zero. Controller, response format, and user journey identical to old system.
+
+*Code impact:* 14 Command classes deleted, 1 adapter class added, 5 call sites changed in SchedulerInfoServiceImpl, QSchedulerServiceImpl rewritten to use GraphQL + REST.
+{panel}
+
+----
+
+h2. 13. References
+
+* IBM BAMOE 9.4 Migration Tutorials: https://www.ibm.com/docs/en/ibamoe/9.4.x?topic=80x-using-bamoe-migration-tutorials
+* Apache KIE Kogito Jobs Service: https://github.com/apache/incubator-kie-kogito-runtimes/wiki/Jobs-Service
+* Quartz Scheduler JDBCJobStore: https://www.quartz-scheduler.org/documentation/quartz-2.3.0/tutorials/tutorial-lesson-09.html
+* Spring Boot Quartz Integration: https://docs.spring.io/spring-boot/docs/current/reference/html/io.html#io.quartz
